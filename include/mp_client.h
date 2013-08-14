@@ -15,24 +15,24 @@
 #ifndef _MPING_MPING_H_
 #define _MPING_MPING_H_
 
+#include "mlab/socket_family.h"
+#include "mp_socket.h"
+#include "mp_stats.h"
+
 #include <stdint.h>
 #include <set>
 #include <string>
 
-#include "mp_socket.h"
-#include "mp_stats.h"
-#include "mlab/socket_family.h"
-
 //#define MP_PRINT_TIMELINE
 
-class MPing{
+class MPingClient{
   public:
     size_t     pkt_size;  // packet size in bytes
-    unsigned short  server_port;
-    SocketFamily server_family;
+//    uint16_t  server_port;
+//    SocketFamily server_family;
 
-    MPing(const int& argc, const char **argv); 
-    bool IsServerMode() const;
+    MPingClient(const int& argc, const char **argv); 
+//    bool IsServerMode() const;
     void Run();
 
   protected:
@@ -46,18 +46,19 @@ class MPing{
     bool       slow_start;
     int        ttl;
     int        inc_ttl;  // auto increase TTL to this value
-    int        loop_size;  // -1 to -4
+    int        loop_size;  // 1 to 4
     bool       version;
     bool       debug;
     int        burst;  // burst size
     int        interval;  // undefined now
     int        dport;
-    bool       client_mode;
+    uint16_t   client_mode;
+    uint16_t   client_cookie;
     std::string src_addr;
     std::string dst_host;
     std::set<std::string> dest_ips;
-    MpingStat  mp_stat;
     bool       print_seq_time;
+    MpingStat  mp_stat;
 
     void ValidatePara();
     virtual bool GoProbing(const std::string& dst_addr);
@@ -66,14 +67,14 @@ class MPing{
     virtual bool WindowLoop(MpingSocket *sock);
     virtual bool IntervalLoop(int intran, MpingSocket *sock);
     int GetNeedSend(int _burst, bool _start_burst, bool _slow_start,
-                    uint32_t _sseq, uint32_t _mrseq, int intran,
+                    int64_t _sseq, int64_t _mrseq, int intran,
                     int mustsend);
 
     // parameters used during running
     struct timeval now;
     bool start_burst;
-    uint32_t sseq;
-    uint32_t mrseq;
+    int64_t sseq;
+    int64_t mrseq;
     size_t cur_packet_size;
 
     // signal handling

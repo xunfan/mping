@@ -11,11 +11,9 @@
 #include "mlab/host.h"
 #include "mlab/mlab.h"
 #include "mlab/protocol_header.h"
-#include "mlab/server_socket.h"
 #include "mp_common.h"
 #include "mp_log.h"
-#include "mp_mping.h"
-#include "mp_server.h"
+#include "mp_client.h"
 #include "scoped_ptr.h"
 
 namespace {
@@ -35,14 +33,13 @@ namespace {
       -B <bnum>   Send <bnum> packets in burst, should smaller than <num>\n\
       -p <port>   If UDP, destination port number\n\
 \n\
-      -s <sport>  Server mode, liten on UDP <sport>\n\
-      -4          Server mode, use IPv4\n\
-      -6          Server mode, use IPv6\n\
-      -c          Client mode, sending with UDP to a server running -s\n\
-      -r          Print time and sequence number of every send/recv packet.\n\
-                  The time is relative to the first packet sent.\n\
-                  A negative sequence number indicates a recv packet.\n\
-                  Be careful, there usually are huge number of packets.\n\
+      -c <mode>   Client mode, sending with UDP to a mping server\n\
+                  <mode> coule be 1 and 2, 1 means server echo back\n\
+                  whole pakcet, 2 means server echo back first 24 bytes\n\
+      -r          Print time and sequence number of every send/recv packet\n\
+                  The time is relative to the first packet sent\n\
+                  A negative sequence number indicates a recv packet\n\
+                  Be careful, there usually are huge number of packets\n\
 \n\
       -V, -d  Version, Debug (verbose)\n\
 \n\
@@ -50,20 +47,20 @@ namespace {
       <host>     Target host\n";
 
 const int kNbTab[] = {64, 100, 500, 1000, 1500, 2000, 3000, 4000, 0};
-const char *kVersion = "mping version: 2.1 2013.08)";
+const char *kVersion = "mping version: 2.1 (2013.08)";
 const int kDefaultTTL = 255;
 
 // when testing, only send these packets every sec
 const int kMaximumOutPacketsInTest = 20;
 }  // namespace
-int MPing::haltf = 0;
-long MPing::tick = 0;
-bool MPing::timedout = false;
+int MPingClient::haltf = 0;
+long MPingClient::tick = 0;
+bool MPingClient::timedout = false;
 
-void MPing::ring(int signo) {
+void MPingClient::ring(int signo) {
   struct sigaction sa, osa;
   sigemptyset(&sa.sa_mask);
-  sa.sa_handler = &MPing::ring;
+  sa.sa_handler = &MPingClient::ring;
   sa.sa_flags = SA_INTERRUPT;
   if (sigaction(SIGALRM, &sa, &osa) < 0) {
     LOG(FATAL, "sigaction SIGALRM. %s [%d]", strerror(errno), errno);
@@ -72,7 +69,7 @@ void MPing::ring(int signo) {
   tick = 0;
 }
 
-void MPing::halt(int signo) {
+void MPingClient::halt(int signo) {
   struct sigaction sa, osa;
   sigemptyset(&sa.sa_mask);
   sa.sa_flags = SA_INTERRUPT;
@@ -82,34 +79,34 @@ void MPing::halt(int signo) {
       LOG(FATAL, "sigaction SIGINT. %s [%d]", strerror(errno), errno);
     }
   } else {
-    sa.sa_handler = &MPing::halt;
+    sa.sa_handler = &MPingClient::halt;
     if (sigaction(SIGINT, &sa, &osa) < 0) {
       LOG(FATAL, "sigaction SIGINT. %s [%d]", strerror(errno), errno);
     }
   }
 }
 
-void MPing::InitSigAlarm() {
+void MPingClient::InitSigAlarm() {
   struct sigaction sa, osa;
   sigemptyset(&sa.sa_mask);
-  sa.sa_handler = &MPing::ring;
+  sa.sa_handler = &MPingClient::ring;
   sa.sa_flags = SA_INTERRUPT;
   if (sigaction(SIGALRM, &sa, &osa) < 0) {
     LOG(FATAL, "sigaction SIGALRM. %s [%d]", strerror(errno), errno);
   }
 }
 
-void MPing::InitSigInt() {
+void MPingClient::InitSigInt() {
   struct sigaction sa, osa;
   sigemptyset(&sa.sa_mask);
-  sa.sa_handler = &MPing::halt;
+  sa.sa_handler = &MPingClient::halt;
   sa.sa_flags = SA_INTERRUPT;
   if (sigaction(SIGINT, &sa, &osa) < 0) {
     LOG(FATAL, "sigaction SIGINT. %s [%d]", strerror(errno), errno);
   }
 }
 
-void MPing::Run() {
+void MPingClient::Run() {
   if (dest_ips.empty()) {
     LOG(ERROR, "No target address.");
     return;
@@ -132,11 +129,7 @@ void MPing::Run() {
   }
 }
 
-bool MPing::IsServerMode() const {
-  return (server_port > 0);
-}
-
-bool MPing::GoProbing(const std::string& dst_addr) {
+bool MPingClient::GoProbing(const std::string& dst_addr) {
   size_t maxsize;
   start_burst = false;  // set true when win_size > burst size
   timedout = true;
@@ -152,7 +145,12 @@ bool MPing::GoProbing(const std::string& dst_addr) {
     return false;
   }
 
-  mp_stat.Initialize(win_size, print_seq_time);
+  // make TCP to server is in C/S mode
+  if (client_mode > 0) {
+    if (!mysock->SendHello(&client_cookie))
+      return false;
+//    LOG(INFO, "client_cookie %d", client_cookie);
+  }
 
   if (!TTLLoop(mysock.get())) {
     return false;
@@ -160,14 +158,14 @@ bool MPing::GoProbing(const std::string& dst_addr) {
 
   mp_stat.PrintStats();
 
-// #ifdef MP_TEST
-//   mystat->PrintTimeLine();
-// #endif
+  if (client_mode > 0) {
+    mysock->SendDone(client_cookie);
+  }
 
   return true;
 }
 
-bool MPing::TTLLoop(MpingSocket *sock) {
+bool MPingClient::TTLLoop(MpingSocket *sock) {
   ASSERT(sock != NULL);
 
   int tempttl = 1;
@@ -207,7 +205,7 @@ bool MPing::TTLLoop(MpingSocket *sock) {
   return true;
 }
 
-bool MPing::BufferLoop(MpingSocket *sock) {
+bool MPingClient::BufferLoop(MpingSocket *sock) {
   ASSERT(sock != NULL);
 
   if (pkt_size > 0)
@@ -266,7 +264,7 @@ bool MPing::BufferLoop(MpingSocket *sock) {
   return true;
 }
 
-bool MPing::WindowLoop(MpingSocket *sock) {
+bool MPingClient::WindowLoop(MpingSocket *sock) {
   ASSERT(sock != NULL);
   // third loop: window size
   // no -f flag:        1,2,3,....,win_size,0,break
@@ -312,8 +310,8 @@ bool MPing::WindowLoop(MpingSocket *sock) {
   return true;
 }
 
-int MPing::GetNeedSend(int _burst, bool _start_burst, bool _slow_start, 
-                uint32_t _sseq, uint32_t _mrseq, int intran,
+int MPingClient::GetNeedSend(int _burst, bool _start_burst, bool _slow_start, 
+                int64_t _sseq, int64_t _mrseq, int intran,
                 int mustsend) {
   int diff;
   int maxopen;
@@ -331,7 +329,7 @@ int MPing::GetNeedSend(int _burst, bool _start_burst, bool _slow_start,
   return need_send;
 }
 
-bool MPing::IntervalLoop(int intran, MpingSocket *sock) {
+bool MPingClient::IntervalLoop(int intran, MpingSocket *sock) {
   ASSERT(sock != NULL);
 
   int mustsend = 0;
@@ -357,7 +355,7 @@ bool MPing::IntervalLoop(int intran, MpingSocket *sock) {
 #endif        
   while (tick >= now.tv_sec) {
     int rt;
-    unsigned int rseq;
+    int64_t rseq;
     int err;
     bool timeout = false;
     int need_send;
@@ -370,7 +368,7 @@ bool MPing::IntervalLoop(int intran, MpingSocket *sock) {
 
     while (need_send > 0) {
       sseq++;
-      rt = sock->SendPacket(sseq, cur_packet_size, &err);
+      rt = sock->SendPacket(sseq, client_cookie, cur_packet_size, &err);
 
       if (rt < 0) {  // send fails
         if (err != EINTR) { 
@@ -432,7 +430,8 @@ bool MPing::IntervalLoop(int intran, MpingSocket *sock) {
       mp_stat.EnqueueRecv(rseq, now);
 
       if (sseq < rseq) {
-        LOG(ERROR, "recv a seq larger than sent %d %d %d",
+        LOG(ERROR, "recv a seq larger than sent %" PRId64 ""
+                   "%" PRId64 " %" PRId64 "",
             mrseq, rseq, sseq);
       } else {
         mrseq = rseq;
@@ -449,28 +448,28 @@ bool MPing::IntervalLoop(int intran, MpingSocket *sock) {
   return true;
 }
 
-MPing::MPing(const int& argc, const char **argv) :
-      pkt_size(0),                                                              
-      server_port(0),
-      server_family(SOCKETFAMILY_UNSPEC),
-      win_size(4),                                                              
-      loop(false),                                                              
-      rate(0),                                                                  
-      slow_start(false),                                                        
-      ttl(0),                                                                   
-      inc_ttl(0),                                                               
-      loop_size(0),                                                             
-      version(false),                                                           
-      debug(false),                                                             
-      burst(0),                                                                 
-      interval(0),
-      dport(0),
-      client_mode(false),
-      print_seq_time(false),
-      start_burst(false),
-      sseq(0),
-      mrseq(0),
-      cur_packet_size(0) {
+MPingClient::MPingClient(const int& argc, const char **argv) 
+    :  pkt_size(0),
+       win_size(4),
+       loop(false),
+       rate(0),
+       slow_start(false),
+       ttl(0),
+       inc_ttl(0),
+       loop_size(0),
+       version(false),
+       debug(false),
+       burst(0),
+       interval(0),
+       dport(0),
+       client_mode(0),
+       client_cookie(0),
+       print_seq_time(false),
+       mp_stat(win_size, print_seq_time),
+       start_burst(false),
+       sseq(0),
+       mrseq(0),
+       cur_packet_size(0) {
   int ac = argc;
   const char **av = argv;
   const char *p;
@@ -493,10 +492,7 @@ MPing::MPing(const int& argc, const char **argv) :
           case 'S': slow_start = true; av--; break;
           case 'V': version = true; av--; break;
           case 'd': debug = true; av--; break;
-          case 'c': client_mode = true; av--; break;
           case 'r': print_seq_time = true; av--; break;
-          case '4': server_family = SOCKETFAMILY_IPV4; av--; break;
-          case '6': server_family = SOCKETFAMILY_IPV6; av--; break;
           default: LOG(FATAL, "\n%s", usage); break;
         }
       } else {
@@ -506,7 +502,6 @@ MPing::MPing(const int& argc, const char **argv) :
           case 'R': { rate = atoi(*av); ac--; break; }
           case 'S': { slow_start = true; av--; break; }
           case 't': { ttl = atoi(*av); ac--; break; }
-          case 's': { server_port = atoi(*av); ac--; break; }
           case 'a': { inc_ttl = atoi(*av); ttl = inc_ttl; ac--; break; }
           case 'b': { pkt_size = atoi(*av); ac--; break; }
           case 'l': { loop_size = atoi(*av); ac--; break; }
@@ -514,10 +509,8 @@ MPing::MPing(const int& argc, const char **argv) :
           case 'B': { burst = atoi(*av); ac--; break; }
           case 'V': { version = true; av--; break; }
           case 'd': { debug = true; av--; break; }
-          case 'c': { client_mode = true; av--; break; }
+          case 'c': { client_mode = atoi(*av); ac--; break; }
           case 'r': { print_seq_time = true; av--; break; }
-          case '4': { server_family = SOCKETFAMILY_IPV4; av--; break; }
-          case '6': { server_family = SOCKETFAMILY_IPV6; av--; break; }
           case 'F': { src_addr = std::string(*av); ac--; break; }
           default: { 
             LOG(FATAL, "Unknown parameter -%c\n%s", p[1], usage); break; 
@@ -528,7 +521,7 @@ MPing::MPing(const int& argc, const char **argv) :
       if (!host_set) {
         dst_host = std::string(p);  
         av--;
-        host_set = 1;
+        host_set = true;
       }else{
         LOG(FATAL, "%s, %s\n%s", p, dst_host.c_str(), usage);
       }
@@ -546,7 +539,7 @@ MPing::MPing(const int& argc, const char **argv) :
   ValidatePara();
 }
 
-void MPing::ValidatePara() {
+void MPingClient::ValidatePara() {
 
   // print version
   if (version) {
@@ -555,17 +548,13 @@ void MPing::ValidatePara() {
   }
 
   // server mode
-  if (server_port > 0) {
-    if (server_port > 65535) {
-      LOG(FATAL, "Server port cannot larger than 65535.");
-    }
-    
-    if (server_family == SOCKETFAMILY_UNSPEC){
-      LOG(FATAL, "Need to know the socket family, use -4 or -6.");
-    }
-
-    return;
-  }
+//  if (server_port > 0) {
+//    if (server_family == SOCKETFAMILY_UNSPEC){
+//      LOG(FATAL, "Need to know the socket family, use -4 or -6.");
+//    }
+//
+//    return;
+//  }
 
   if (debug) {
     SetLogSeverity(VERBOSE);
@@ -577,9 +566,13 @@ void MPing::ValidatePara() {
   }
 
   // client mode
-  if (client_mode) {
+  if (client_mode > 0) {
     if (dport == 0) {
       LOG(FATAL, "Client mode must have destination port using -p.");
+    }
+
+    if (client_mode > 2) {
+      LOG(FATAL, "Client mode can only be set to 1 or 2.");
     }
 
     if (ttl == 0) {
@@ -631,8 +624,8 @@ void MPing::ValidatePara() {
 
   // validate UDP destination port
   if (dport > 0 ) {
-    if (ttl == 0 && !client_mode) {
-      LOG(FATAL, "-p can only use together with -t -a or -p.\n%s", usage);
+    if (ttl == 0 && client_mode == 0) {
+      LOG(FATAL, "-p can only use together with -t -a or -c.\n%s", usage);
     }
 
     if (dport > 65535) {
